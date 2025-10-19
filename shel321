@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shell Storm Terminal</title>
+
+<!-- CSS goes here -->
+<style>
+/* paste your style.css content here */
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div id="screen"></div>
+  <div class="controls">
+    <button id="focusBtn">Focus Terminal</button>
+    <button id="clearBtn">Clear</button>
+    <div class="footer">Type <code>help</code> — Arrow keys for history — Tab autocomplete — Ctrl+L clears</div>
+  </div>
+</div>
+
+/* ---------- Terminal UI ---------- */
+const screen = document.getElementById('screen');
+const focusBtn = document.getElementById('focusBtn');
+const clearBtn = document.getElementById('clearBtn');
+
+let currentInputEl = null;
+let historyIndex = state.history.length;
+
+renderPrompt();
+
+focusBtn.onclick = () => focusInput();
+clearBtn.onclick = () => clearScreen();
+
+function clearScreen() {
+  screen.innerHTML = '';
+  renderPrompt();
+}
+
+function renderPrompt(prefill = '') {
+  const line = document.createElement('div');
+  line.className = 'line';
+
+  const prompt = document.createElement('div');
+  prompt.className = 'prompt small muted';
+  prompt.textContent = `${state.username}@shell:${state.cwd}$`;
+
+  const inputWrap = document.createElement('div');
+  inputWrap.className = 'input';
+
+  const input = document.createElement('input');
+  input.className = 'cmd';
+  input.autocomplete = 'off';
+  input.value = prefill;
+
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor';
+
+  inputWrap.appendChild(input);
+  inputWrap.appendChild(cursor);
+  line.appendChild(prompt);
+  line.appendChild(inputWrap);
+  screen.appendChild(line);
+
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  currentInputEl = input;
+
+  input.addEventListener('keydown', onKeyDown);
+  input.addEventListener('blur', () => setTimeout(() => input.focus(), 10));
+
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+/* ---------- Command Handling ---------- */
+const builtins = ['help','clear','history','echo','whoami','date','ls','cd','mkdir','touch','cat','rm','edit','download','calc','note','todo','tic-tac-toe','move','hangman','guess-letter','rps','guess','joke','quote','banner','fortune'];
+
+function onKeyDown(e){
+  if(e.key==='Enter'){
+    const raw = currentInputEl.value.trim();
+    runCommand(raw);
+  } else if(e.key==='ArrowUp'){
+    if(state.history.length===0) return;
+    historyIndex = Math.max(0, historyIndex-1);
+    currentInputEl.value = state.history[historyIndex] || '';
+    e.preventDefault();
+  } else if(e.key==='ArrowDown'){
+    historyIndex = Math.min(state.history.length, historyIndex+1);
+    currentInputEl.value = state.history[historyIndex] || '';
+    e.preventDefault();
+  } else if(e.key==='Tab'){
+    e.preventDefault();
+    const val = currentInputEl.value;
+    const parts = val.split(/\s+/);
+    const cur = parts[0] || '';
+    if(parts.length===1){
+      const match = builtins.find(c => c.startsWith(cur));
+      if(match) currentInputEl.value = match + ' ';
+    } else {
+      const target = parts[1] || '';
+      const dir = getDir(state.cwd);
+      const names = Object.keys(dir.children || {}).filter(n => n.startsWith(target));
+      if(names.length) currentInputEl.value = parts[0] + ' ' + names[0] + (names[0].indexOf(' ')>=0 ? '"' : ' ');
+    }
+  } else if((e.ctrlKey || e.metaKey) && e.key.toLowerCase()==='l'){
+    e.preventDefault(); clearScreen();
+  }
+}
+
+/* ---------- Run Command ---------- */
+function runCommand(raw){
+  const inputLine = currentInputEl.parentElement.parentElement;
+  const typed = currentInputEl.value;
+
+  const promptText = inputLine.querySelector('.prompt').textContent;
+  const outLine = document.createElement('div');
+  outLine.className = 'small muted';
+  outLine.textContent = promptText + ' ' + typed;
+  screen.insertBefore(outLine, inputLine);
+
+  inputLine.remove();
+
+  state.history.push(typed);
+  historyIndex = state.history.length;
+  save();
+
+  if(!typed){ renderPrompt(); return; }
+
+  const [cmd, ...args] = parseArgs(typed);
+  const handler = commandHandlers[cmd];
+  if(handler){
+    try { handler(args); } 
+    catch(err){ print('Error: ' + err.message); }
+  } else print(`Command not found: ${cmd}. Type help.`);
+
+  renderPrompt();
+}
+
+/* ---------- Command Handlers ---------- */
+const commandHandlers = {
+  help(){ print('Available commands:\n'+builtins.join(', ')); },
+  clear(){ /* handled by UI */ },
+  history(){ state.history.forEach((h,i)=>print(`${i+1}: ${h}`)); },
+  echo(args){ print(args.join(' ')); },
+  whoami(){ print(state.username); },
+  date(){ print(new Date().toString()); },
+  ls(args){ 
+    const path = resolvePath(args[0] || '.'); 
+    const dir = getDir(path); 
+    if(!dir){ print('No such directory'); return; } 
+    const names = Object.keys(dir.children||{}).map(n=> dir.children[n].type==='dir'? n+'/':n ).join('  '); 
+    print(names || '(empty)');
+  },
+  cd(args){ const path = resolvePath(args[0]||'/'); const dir=getDir(path); if(!dir){print('No such directory');return;} state.cwd=path; save(); },
+  mkdir(args){ if(!args[0]){print('Usage: mkdir <folder>');return;} const dir=getDir(state.cwd); if(!dir) return; dir.children[args[0]]={type:'dir',children:{}}; save(); print('Created '+args[0]); },
+  touch(args){ if(!args[0]){print('Usage: touch <file>'); return;} const dir=getDir(state.cwd); if(!dir) return; dir.children[args[0]]={type:'file',content:''}; save(); print('Created '+args[0]); },
+  cat(args){ 
+    const path = resolvePath(args[0]||''); 
+    const pdir = path.split('/').slice(0,-1).join('/')||'/'; 
+    const fname = path.split('/').pop(); 
+    const dir=getDir(pdir); if(!dir||!dir.children[fname]){print('No such file'); return;} 
+    if(dir.children[fname].type!=='file'){print('Not a file'); return;}
+    print(dir.children[fname].content);
+  },
+  rm(args){ 
+    const path = resolvePath(args[0]||''); 
+    const pdir=path.split('/').slice(0,-1).join('/')||'/'; 
+    const fname=path.split('/').pop(); 
+    const dir=getDir(pdir); if(!dir||!dir.children[fname]){print('No such file/dir');return;} 
+    delete dir.children[fname]; save(); print('Removed '+fname);
+  },
+  edit(args){
+    if(!args[0]){ print('Usage: edit <file>'); return;}
+    const path = resolvePath(args[0]);
+    const pdir=path.split('/').slice(0,-1).join('/')||'/'; const fname=path.split('/').pop(); 
+    const dir=getDir(pdir); if(!dir||!dir.children[fname]){print('No such file');return;}
+    const node=dir.children[fname]; if(node.type!=='file'){print('Not a file');return;}
+    const newContent=prompt('Edit '+fname, node.content||''); if(newContent!==null){node.content=newContent; save(); print('Saved '+fname);}else{print('Edit canceled');}
+  },
+  download(args){
+    if(!args[0]){print('Usage: download <file>'); return;}
+    const path=resolvePath(args[0]); const pdir=path.split('/').slice(0,-1).join('/')||'/'; const fname=path.split('/').pop();
+    const dir=getDir(pdir); if(!dir||!dir.children[fname]){print('No such file');return;}
+    const node=dir.children[fname]; if(node.type!=='file'){print('Not a file');return;}
+    const blob=new Blob([node.content||''],{type:'text/plain'}); const url=URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download=fname; document.body.appendChild(a); a.click(); a.remove();
+    print('Download started: '+fname);
+  },
+  calc(args){ 
+    const expr=args.join(' '); 
+    if(!expr){print('Usage: calc <expr>'); return;} 
+    if(/[^0-9+\-*/%^().\s]/.test(expr)){print('Invalid characters'); return;}
+    try{ const res=Function('"use strict";return('+expr.replace(/\^/g,'**')+')')(); print(res);}catch(e){print('Invalid expression');}
+  },
+  note(args){
+    if(!args[0]){print('Usage: note add/list/delete'); return;}
+    if(args[0]==='add'){ const txt=args.slice(1).join(' '); if(!txt){print('note add <text>');return;} state.notes.push(txt); save(); print('Note added');}
+    else if(args[0]==='list'){ if(state.notes.length===0) print('(no notes)'); state.notes.forEach((n,i)=>print(`${i+1}: ${n}`)); }
+    else if(args[0]==='delete'){ const idx=parseInt(args[1]); if(!idx||idx<1||idx>state.notes.length){print('Invalid');return;} state.notes.splice(idx-1,1); save(); print('Deleted'); }
+    else print('Usage: note add/list/delete');
+  },
+  todo(args){
+    if(!args[0]){print('Usage: todo add/list/done/delete'); return;}
+    if(args[0]==='add'){ const txt=args.slice(1).join(' '); if(!txt){print('todo add <task>'); return;} state.todos.push({task:txt,done:false}); save(); print('Task added');}
+    else if(args[0]==='list'){ if(state.todos.length===0) print('(no tasks)'); state.todos.forEach((t,i)=>print(`${i+1}: [${t.done?'x':' '}] ${t.task}`)); }
+    else if(args[0]==='done'){ const idx=parseInt(args[1]); if(!idx||idx<1||idx>state.todos.length){print('Invalid');return;} state.todos[idx-1].done=true; save(); print('Marked done');}
+    else if(args[0]==='delete'){ const idx=parseInt(args[1]); if(!idx||idx<1||idx>state.todos.length){print('Invalid');return;} state.todos.splice(idx-1,1); save(); print('Deleted');}
+    else print('Usage: todo add/list/done/delete');
+  },
+  'tic-tac-toe'(){ const b=['','','','','','','','','']; state.game.tictactoe={board:b,turn:'X'}; print('Tic-Tac-Toe started. Use move <0-8>'); printBoard(b); },
+  move(args){ 
+    if(!state.game.tictactoe){print('No game');return;} 
+    const pos=parseInt(args[0]); if(isNaN(pos)||pos<0||pos>8){print('Invalid');return;}
+    const g=state.game.tictactoe; if(g.board[pos]){print('Occupied');return;}
+    g.board[pos]='X'; if(checkWin(g.board,'X')){printBoard(g.board); print('You win!'); delete state.game.tictactoe; return;}
+    const empties=g.board.map((v,i)=>v?null:i).filter(v=>v!==null); const comp=empties[Math.floor(Math.random()*empties.length)]; if(comp!==undefined) g.board[comp]='O';
+    if(checkWin(g.board,'O')){printBoard(g.board); print('Computer wins'); delete state.game.tictactoe; return;}
+    printBoard(g.board); save();
+  },
+  hangman(){ print('Use guess-letter <letter>'); state.game.hangman={word:'shell',guessed:[]}; print(maskWord('shell',[])); },
+  'guess-letter'(args){ if(!state.game.hangman){print('No game');return;} const l=args[0]; if(!l||l.length!==1){print('guess-letter <char>');return;} const g=state.game.hangman; if(g.guessed.includes(l)){print('Already guessed');return;} g.guessed.push(l); const masked=maskWord(g.word,g.guessed); print(masked); if(!masked.includes('_')){print('You won!'); delete state.game.hangman;} save(); },
+  guess(args){ if(!state.game.guess){state.game.guess={num:Math.floor(Math.random()*100)+1}; print('Guess a number 1-100 with guess <num>'); save(); return;} const n=parseInt(args[0]); if(!n){print('Usage: guess <num>'); return;} const g=state.game.guess; if(n<g.num) print('Too low'); else if(n>g.num) print('Too high'); else{ print('Correct!'); delete state.game.guess;} save(); },
+  rps(args){ if(!args[0]){print('Usage: rps <rock|paper|scissors>'); return;} print(decideRPS(args[0],['rock','paper','scissors'][Math.floor(Math.random()*3)])); },
+  joke(){ print('Why did the coder quit? Because he didn’t get arrays.'); },
+  quote(){ print('"Stay hungry, stay foolish." — Steve Jobs'); },
+  banner(){ print('SHELL STORM TERMINAL'); },
+  fortune(){ print(['You will code something amazing today','Fun is mandatory','Keep practicing'].sort(()=>0.5-Math.random())[0]); }
+};
+
+<script>
+// paste storage.js here
+// paste utils.js here
+// paste games.js here
+// paste terminal.js here
+</script>
+
+</body>
+</html>
